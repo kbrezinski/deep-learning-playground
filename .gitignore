@@ -116,3 +116,4 @@ dmypy.json
 */data
 *.txt
 *.gz
+*.png
