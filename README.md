@@ -1,2 +1,2 @@
-# stat-453-dee-learning
+# stat-453-deep-learning
  
