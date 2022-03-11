@@ -8,7 +8,7 @@ Tensor = torch.Tensor
 
 
 class RMSProp:
-    def __init__(self, params: Tensor, lr: float, beta: int = 0.9, eps: float = 1e-13):
+    def __init__(self, params: Tensor, lr: float, beta: int = 0.9, eps: float = 1e-8):
 
         self.params = params
         self.beta = beta
@@ -42,7 +42,7 @@ class Adam:
         self.rms = 0
         self.mom = 0
         self.t = 1
-        self.eps = 1e-13
+        self.eps = 1e-8
 
     def step(self):
         curr_mom = (self.beta[0] * self.mom) + ((1 - self.beta[0]) * self.params.grad)
