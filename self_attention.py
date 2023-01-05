@@ -21,44 +21,55 @@ def basic_self_attention(X):
     return weighted_sum
 
 
-def self_attention(Q, K, V, scaled=False):
-    """
-    Learnable parameters
-    """
-    if scaled:
-        # scale the dot product by the square root of the dimensionality
-        Q = Q / torch.sqrt(torch.tensor(Q.shape[-1], dtype=torch.float32))
+class ScaledDotProductAttention(torch.nn.Module):
+    def __init__(self, d_e, num_heads, scaled=False):
+        super().__init__()
+        self.d_e = d_e
+        self.scaled = scaled
+        self.num_heads = num_heads
 
-    # compute dot product with itself to generate attention weights
-    attention_weights = torch.matmul(Q, K.T)
+        self.W_q = torch.nn.Parameter(torch.randn(d_e, d_e * num_heads))
+        self.W_k = torch.nn.Parameter(torch.randn(d_e, d_e * num_heads))
+        self.W_v = torch.nn.Parameter(torch.randn(d_e, d_e * num_heads))
+        self.W_o = torch.nn.Parameter(torch.randn(d_e, d_e * num_heads))
 
-    # normalize using softmax
-    attention_weights = torch.softmax(attention_weights, dim=1)
+    def __call__(self, X):
 
-    # multiply attention weights with input to get weighted sum
-    weighted_sum = torch.matmul(attention_weights, V)
+        Q = torch.matmul(X, self.W_q)
+        K = torch.matmul(X, self.W_k)
+        V = torch.matmul(X, self.W_v)
 
-    return weighted_sum
+        if self.scaled:
+            # scale the dot product by the square root of the dimensionality
+            Q = Q / torch.sqrt(torch.tensor(Q.shape[-1], dtype=torch.float32))
+
+        # compute dot product with itself to generate attention weights
+        attention_weights = torch.matmul(Q, K.T)
+
+        # normalize using softmax
+        attention_weights = torch.softmax(attention_weights, dim=1)
+
+        # multiply attention weights with input to get weighted sum
+        weighted_sum = torch.matmul(attention_weights, V)
+
+        return weighted_sum
 
 
 # pre-amble
-embedding_size = 4
-input_seq_size = 512
-num_heads = 8
+T = 10
+d_e = 512
+num_heads = 2
 
-X = torch.randn(input_seq_size, embedding_size)
-Q = torch.randn(input_seq_size, embedding_size * num_heads)
-K = torch.randn(input_seq_size, embedding_size * num_heads)
-V = torch.randn(input_seq_size, embedding_size * num_heads)
-W_o = torch.randn(embedding_size * num_heads, embedding_size)
+# embedding of word sentece
+X = torch.randn(T, d_e)
 
-# shape = (input_seq_size, embedding_size)
-weighted_sum = self_attention(Q, K, V, scaled=True)
+attention = ScaledDotProductAttention(d_e, scaled=True)
+weighted_sum = attention(X)
 print(weighted_sum.shape)
 
 # shape = (input_seq_size, embedding_size)
-output = torch.matmul(weighted_sum, W_o)
-print(output.shape)
+#output = torch.matmul(weighted_sum, W_o)
+#print(output.shape)
 
 
 
