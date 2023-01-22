@@ -24,7 +24,7 @@ def sample_dataset(start, end, n):
 x_train, y_train = sample_dataset(start, end, n)
 scatter(x_train, y_train, c="blue", marker="*")
 
-# %% Larger distribution
+# %% Larger distribution beyond the training range
 figure(figsize=(9, 7))
 x_test, y_test = sample_dataset(-10, 10, 200)
 scatter(x_test, y_test, c="green", marker="*")
@@ -50,36 +50,19 @@ tensor_y_test = torch.Tensor(y_test).unsqueeze(1)
 test_dataset = TensorDataset(tensor_x_test, tensor_y_test)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-# %%
-import torch.nn as nn
-class MLP(nn.Module):
-    def __init__(self):
-        super(MLP, self).__init__()
-        hidden_dim = 32
-        self.fc1 = nn.Linear(1, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.mu = nn.Linear(hidden_dim, 1)
-        self.var = nn.Linear(hidden_dim, 1)
-
-    def forward(self, x):
-        x = self.fc1(x).tanh()
-        x = self.fc2(x).tanh()
-        mu = self.mu(x)
-        var = self.var(x).exp()
-        return mu, var
-
-model = MLP()
-print(sum(p.numel() for p in model.parameters() if p.requires_grad))
-
 # %% 
 import pandas as pd 
 import seaborn as sns
+from torch.distributions.mixture_same_family import MixtureSameFamily
+from torch.distributions import Categorical, Normal
 sns.set(rc={'figure.figsize':(9, 7)})
 
-def make_plot(model):
+## Plotting functions
+# plot function for single gaussian
+def make_plot_gaussian(model, save=False):
     # Get predictions
     mu, var = model(tensor_x_test)
-    mu, sigma = mu.detach().numpy(), var.detach().numpy().sqrt()
+    mu, sigma = mu.detach().numpy(), var.detach().numpy()**0.5
 
     # ~ 95% conf. interval
     y_vals = [mu, mu+2*sigma, mu-2*sigma]
@@ -104,19 +87,122 @@ def make_plot(model):
 
     # Plot test data on top
     scatter(x_test, y_test, c="green", marker="*", alpha=0.5)
+    if save:
+        sns_plot.figure.savefig("images/uncertainty.png", dpi=150, bbox_inches='tight')
     plt.show()
+# plot function for mixture of gaussians
+def make_plot_mixture(model, save=False):
+    # Get predictions
+    mus, sigmas, alphas = model(tensor_x_test)
+
+    # Define distribution with these parameters
+    gmm = MixtureSameFamily(
+            mixture_distribution=Categorical(probs=alphas),
+            component_distribution=Normal(
+                loc=mus,       
+                scale=sigmas))
+    mean = gmm.mean.detach().numpy()
+    var = gmm.variance.detach().numpy()
+    y_vals = [mean, mean+2*var**(1/2), mean-2*var**(1/2)]
+    dfs = []
+    
+    for i in range(3):
+        data = {
+              "x": list(tensor_x_test.squeeze().numpy()),
+              "y": list(y_vals[i].squeeze())
+        }
+        temp = pd.DataFrame.from_dict(data)
+        dfs.append(temp)
+    df = pd.concat(dfs).reset_index()
+
+    # Plot means
+    for i in range(model.num_gaussians):
+        scatter(x_test, mus[:, i].detach().numpy(), alpha=0.3, s=4)
+
+    # Plot predictions with confidence
+    sns_plot = sns.lineplot(data=df, x="x", y="y")
+    plt.axvline(x=start)
+    plt.axvline(x=end)
+    scatter(x_test, y_test, c="green", marker="*", alpha=0.3)
+    if save:
+        sns_plot.figure.savefig("images/uncertainty_mixture.png", dpi=150, bbox_inches='tight')
+    plt.show()
+
+    gmm = MixtureSameFamily(
+            mixture_distribution=Categorical(probs=alphas),
+            component_distribution=Normal(
+                loc=mu,       
+                scale=sigma))
+    log_likelihood = gmm.log_prob(y.t())
+    return -torch.mean(log_likelihood, axis=1)
+# plot for quantile regression
+def make_plot_quantile(model, save=False):
+    preds = model(tensor_x_test)
+    preds = preds.detach().numpy()
+
+    dfs = []
+    # Lower / Median / Upper
+    y_vals = [preds[:, 1], preds[:, 0], preds[:, 2]]
+
+    for i in range(3):
+      data = {
+            "x": list(tensor_x_test.squeeze().numpy()),
+            "y": list(y_vals[i].squeeze())
+      }
+      temp = pd.DataFrame.from_dict(data)
+      dfs.append(temp)
+
+    df = pd.concat(dfs).reset_index()
+
+    # Plot predictions with confidence
+    sns_plot = sns.lineplot(data=df, x="x", y="y")
+
+    # Highligh training range
+    plt.axvline(x=start)
+    plt.axvline(x=end)
+
+    # Plot train data on top
+    scatter(x_test, y_test, c="green", marker="*", alpha=0.1)
+    if save:
+        sns_plot.figure.savefig("images/uncertainty_quantile.png", dpi=150, bbox_inches='tight')
+    plt.show()
+
+## Loss functions
+# loss function for mixture of gaussians
+def mdn_loss(mu, y, sigma, alphas):
+    gmm = MixtureSameFamily(
+            mixture_distribution=Categorical(probs=alphas),
+            component_distribution=Normal(
+                loc=mu,       
+                scale=sigma))
+    log_likelihood = gmm.log_prob(y.t())
+    return -torch.mean(log_likelihood, axis=1)
+# loss function for quantile regression
+def quantile_loss(preds, target, quantiles=[0.05, 0.5, 0.95]):
+    # Pinball loss
+    losses = []
+    for i, q in enumerate(quantiles):
+        errors = target - torch.unsqueeze(preds[:, i], 1)
+        q_loss = torch.max((q - 1) * errors, q * errors)
+        losses.append(q_loss)
+    loss = torch.mean(torch.sum(torch.cat(losses, dim=1), dim=1))
+    return loss
 
 # %%
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
+from models import Gaussian, MixedGaussian, Quantile
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-# Loss expects mean, variance and target
-criterion = torch.nn.GaussianNLLLoss(eps=1e-02)
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+model = Quantile().to(device)
+print(sum(p.numel() for p in model.parameters() if p.requires_grad))
 
-model.train()
+# Loss expects mean, variance and target
+#criterion = torch.nn.GaussianNLLLoss(eps=1e-2)
+criterion = quantile_loss # mdn_loss
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
 model.to(device)
 for epoch in range(150):
     # Train loop
@@ -125,8 +211,8 @@ for epoch in range(150):
         x = x.to(device)
         y = y.to(device)
         optimizer.zero_grad()
-        mu, var = model(x)
-        loss = criterion(mu, y, var)
+        preds = model(x)
+        loss = criterion(preds, y)
         loss.backward()
         optimizer.step()
     if epoch % 10 == 0:
@@ -137,9 +223,12 @@ for epoch in range(150):
             for batch in test_loader:
                 x = x.to(device)
                 y = y.to(device)
-                mu, var = model(x)
-                all_test_losses.append(criterion(mu, y, var).item())
+                preds = model(x)
+                all_test_losses.append(criterion(preds, y).item())
             test_loss = sum(all_test_losses) / len(all_test_losses)
-        print(f"Epoch {epoch} | batch train loss: {loss:.4f} | test loss: {test_loss}")
-        make_plot(model)
+        print(f"Epoch {epoch} | batch train loss: {loss.item():.4f} | test loss: {test_loss:.4f}")
+        make_plot_quantile(model)
+# %%
+make_plot_mixture(model, save=True)
+
 # %%
