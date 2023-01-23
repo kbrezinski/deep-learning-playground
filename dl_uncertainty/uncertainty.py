@@ -229,6 +229,6 @@ for epoch in range(150):
         print(f"Epoch {epoch} | batch train loss: {loss.item():.4f} | test loss: {test_loss:.4f}")
         make_plot_quantile(model)
 # %%
-make_plot_mixture(model, save=True)
+make_plot_quantile(model, save=True)
 
 # %%
