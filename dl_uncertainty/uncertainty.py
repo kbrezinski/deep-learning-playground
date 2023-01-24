@@ -5,10 +5,9 @@ import matplotlib.pyplot as plt
 from matplotlib.pyplot import scatter, figure
 import math
 import numpy as np
-figure(figsize=(9, 7))
-
 
 # %% Plotting the distribution of the mean and variance of the dataset
+figure(figsize=(9, 7))
 plt.xlim([-10, 10])
 start = -7
 end = 7
@@ -166,6 +165,109 @@ def make_plot_quantile(model, save=False):
     if save:
         sns_plot.figure.savefig("images/uncertainty_quantile.png", dpi=150, bbox_inches='tight')
     plt.show()
+# plot for bayesian neural network
+def make_plot_bayesian(model, samples=300, save=False):
+    # need to sample from the posterior distribution
+    preds = [model(tensor_x_test) for i in range(samples)]
+    preds = torch.stack(preds)
+    means = preds.mean(axis=0).detach().numpy()
+    stds =  preds.std(axis=0).detach().numpy()
+    dfs = []
+    y_vals = [means, means+2*stds, means-2*stds]
+
+    for i in range(3):
+      data = {
+            "x": list(tensor_x_test.squeeze().numpy()),
+            "y": list(y_vals[i].squeeze())
+      }
+      temp = pd.DataFrame.from_dict(data)
+      dfs.append(temp)
+
+    df = pd.concat(dfs).reset_index()
+
+    # Plot predictions with confidence
+    sns_plot = sns.lineplot(data=df, x="x", y="y")
+
+    # Highligh training range
+    plt.axvline(x=start)
+    plt.axvline(x=end)
+
+    # Plot train data on top
+    scatter(x_test, y_test, c="green", marker="*", alpha=0.1)
+    if save:
+        sns_plot.figure.savefig("images/uncertainty_bayesian.png", dpi=150, bbox_inches='tight')
+    plt.show()
+# plot for monte carlo dropout
+def make_plot_dropout(model, samples=300, save=False):
+    # Keep dropout active!
+    model.train()
+    preds = [model(tensor_x_test) for i in range(samples)]
+    preds = torch.stack(preds)
+    means = preds.mean(axis=0).detach().numpy()
+    stds =  preds.std(axis=0).detach().numpy()
+    dfs = []
+    y_vals = [means, means+2*stds, means-2*stds]
+
+    for i in range(3):
+      data = {
+            "x": list(tensor_x_test.squeeze().numpy()),
+            "y": list(y_vals[i].squeeze())
+      }
+      temp = pd.DataFrame.from_dict(data)
+      dfs.append(temp)
+
+    df = pd.concat(dfs).reset_index()
+
+    # Plot predictions with confidence
+    sns_plot = sns.lineplot(data=df, x="x", y="y")
+
+    # Highligh training range
+    plt.axvline(x=start)
+    plt.axvline(x=end)
+
+    # Plot train data on top
+    scatter(x_train, y_train, c="green", marker="*", alpha=0.1)
+    if save:
+        sns_plot.figure.savefig("images/uncertainty_dropout.png", dpi=150, bbox_inches='tight')
+    plt.show()
+# plot for ensemble models
+def make_plot_ensemble(model, save=False):
+    mus = []
+    vars = []
+    for m in model:
+        mu, var = m(tensor_x_test) 
+        mus.append(mu)
+        vars.append(var)
+
+    # For epistemic uncertainty we calculate the std on the mus!
+    means = torch.stack(mus).mean(axis=0).detach().numpy()
+    stds = torch.stack(mus).std(axis=0).detach().numpy()**(1/2)
+
+    dfs = []
+    y_vals = [means, means+2*stds, means-2*stds]
+
+    for i in range(3):
+      data = {
+            "x": list(tensor_x_test.squeeze().numpy()),
+            "y": list(y_vals[i].squeeze())
+      }
+      temp = pd.DataFrame.from_dict(data)
+      dfs.append(temp)
+
+    df = pd.concat(dfs).reset_index()
+
+    # Plot predictions with confidence
+    sns_plot = sns.lineplot(data=df, x="x", y="y")
+
+    # Highligh training range
+    plt.axvline(x=start)
+    plt.axvline(x=end)
+
+    # Plot train data on top
+    scatter(x_train, y_train, c="green", marker="*", alpha=0.1)
+    if save:
+        sns_plot.figure.savefig("images/uncertainty_de.png", dpi=150, bbox_inches='tight')
+    plt.show()
 
 ## Loss functions
 # loss function for mixture of gaussians
@@ -188,47 +290,87 @@ def quantile_loss(preds, target, quantiles=[0.05, 0.5, 0.95]):
     loss = torch.mean(torch.sum(torch.cat(losses, dim=1), dim=1))
     return loss
 
-# %%
+# %% Model training and testing
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
-from models import Gaussian, MixedGaussian, Quantile
+from models import (Gaussian, MixedGaussian, Quantile,
+                     BayesianNetwork, MonteCarlo, Ensemble)
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-model = Quantile().to(device)
+
+model = MonteCarlo().to(device)
+models = [Ensemble().to(device) for _ in range(5)]
 print(sum(p.numel() for p in model.parameters() if p.requires_grad))
 
-# Loss expects mean, variance and target
-#criterion = torch.nn.GaussianNLLLoss(eps=1e-2)
-criterion = quantile_loss # mdn_loss
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+# Loss expects mean, variance and target; others: quantile_loss, mdn_loss,
+criterion = torch.nn.GaussianNLLLoss(eps=1e-2) # 
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+optimizers = [optim.Adam(m.parameters(), lr=0.001) for m in models]
 
-model.to(device)
+#model.to(device)
 for epoch in range(150):
     # Train loop
     model.train()
     for x, y in train_loader:
         x = x.to(device)
         y = y.to(device)
-        optimizer.zero_grad()
-        preds = model(x)
-        loss = criterion(preds, y)
-        loss.backward()
-        optimizer.step()
+
+        losses = []
+        mus = []
+        vars = []
+        for i, model in enumerate(models):
+            optimizers[i].zero_grad()
+            mu, var = model(x)
+            loss = criterion(mu, y, var)
+            loss.backward()
+            optimizers[i].step()
+
+            losses.append(loss.item())
+            mus.append(mu)
+            vars.append(var)
+
+        loss = sum(losses)/len(losses)
+        #optimizer.zero_grad()
+        #preds = model(x)
+        #loss = criterion(preds, y)
+        ## loss used in BayesianNetwork
+        # loss = model.sample_elbo(inputs=x, labels=y, criterion=criterion, sample_nbr=1,
+        #              complexity_cost_weight=0.01/len(train_loader)) 
+
+        #loss.backward()
+        #optimizer.step()
+
     if epoch % 10 == 0:
-        all_test_losses = []
         # Test loop
         model.eval()
+        all_test_losses = []
         with torch.no_grad():
             for batch in test_loader:
                 x = x.to(device)
                 y = y.to(device)
-                preds = model(x)
-                all_test_losses.append(criterion(preds, y).item())
+
+                test_losses = []
+                mus = []
+                vars = []
+                for i, model in enumerate(models):
+                    mu, var = model(x)
+                    test_loss = criterion(mu, y, var)
+                    test_losses.append(test_loss.item())
+                    mus.append(mu)
+                    vars.append(var)
+                all_test_losses.append((sum(test_losses)/len(test_losses)))
+
+                #preds = model(x)
+                #loss = criterion(preds, y)
+                #loss = model.sample_elbo(inputs=x, labels=y, criterion=criterion, sample_nbr=3,
+                #                            complexity_cost_weight=0.01/len(test_loader))
+                #all_test_losses.append(loss.item())
             test_loss = sum(all_test_losses) / len(all_test_losses)
-        print(f"Epoch {epoch} | batch train loss: {loss.item():.4f} | test loss: {test_loss:.4f}")
-        make_plot_quantile(model)
+        test_loss = sum(all_test_losses)/len(all_test_losses)
+        print(f"Epoch {epoch} | batch train loss: {loss:.4f} | test loss: {test_loss:.4f}")
+        make_plot_ensemble(models)
 # %%
-make_plot_quantile(model, save=True)
+make_plot_ensemble(models, save=True)
 
 # %%
