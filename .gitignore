@@ -1,3 +1,8 @@
+
+## directories
+mlops/lightning_logs
+mlops/MNIST
+
 *.ipynb_checkpoints
 *.csv
 
